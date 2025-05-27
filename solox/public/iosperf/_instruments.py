@@ -901,7 +901,6 @@ class ServiceInstruments(DTXService):
                             }
             }]
         """
-        print("PPPPPPPPPPPP")
         config = {
             "bm": 0,
             "cpuUsage": True,

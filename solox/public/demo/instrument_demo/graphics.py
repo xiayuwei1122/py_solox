@@ -5,6 +5,7 @@ import queue
 import time
 from ios_device.servers.Instrument import InstrumentServer
 
+stop_flag = False
 
 def cmd_graphics(rpc, result_queue):
     last_timestamp = 0
@@ -23,15 +24,19 @@ def cmd_graphics(rpc, result_queue):
     rpc.register_undefined_callback(dropped_message)
     rpc.register_channel_callback("com.apple.instruments.server.services.graphics.opengl", on_graphics_message)
     rpc.call("com.apple.instruments.server.services.graphics.opengl", "startSamplingAtTimeInterval:", 0.0)
-    time.sleep(0.5)
-    try:
-        result = result_queue.get(timeout=5)  # 等待 5 秒
-    except queue.Empty:
-        print("Timeout: No message received from on_sysmontap_message.")
-        result = None
+    while True:
+        if not stop_flag:
+            time.sleep(1)
+        else:
+            break
+    # try:
+    #     result = result_queue.get(timeout=5)  # 等待 5 秒
+    # except queue.Empty:
+    #     print("Timeout: No message received from on_sysmontap_message.")
+    #     result = None
     rpc.call("com.apple.instruments.server.services.graphics.opengl", "stopSampling")
     rpc.stop()
-    return result
+    # return result
 
 
 if __name__ == '__main__':

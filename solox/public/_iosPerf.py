@@ -15,6 +15,7 @@ import weakref
 import pdb
 from multiprocessing import Process, Queue
 
+from solox.public.demo.instrument_demo.activity import activity
 from solox.public.demo.instrument_demo.gpu import gpu
 from solox.public.demo.instrument_demo.graphics import cmd_graphics
 from solox.public.demo.instrument_demo.networking import networking
@@ -28,6 +29,10 @@ from typing import Dict, Any
 from ios_device.util.utils import DumpDisk, DumpNetwork, DumpMemory, convertBytes, \
     MOVIE_FRAME_COST, NANO_SECOND, kperf_data
 
+result_fps_gpu_queue = None
+result_network_queue = None
+result_queue = None
+rsd_1 = None
 
 class DataType(str, enum.Enum):
     SCREENSHOT = "screenshot"
@@ -142,18 +147,16 @@ def gen_stimestamp(seconds: Optional[float] = None) -> str:
 
 def iter_fps(d: BaseDevice, rp: RunningProcess, address=None, rsdPort=None, lock=None) -> Iterator[Any]:
     index = 0
+    global result_fps_gpu_queue
     if rp.get_version_lists() == 1:
-        host = address
-        port = rsdPort
         with lock:
-            rsd_1 = RemoteLockdownClient((host, port), userspace_port=60106)
+            if result_fps_gpu_queue is None:
+                monitor_thread = threading.Thread(target=cmd_graphics_thread, args=(address, rsdPort,), daemon=True)
+                monitor_thread.start()
+                time.sleep(1)
 
-            rsd_1.connect()
-            rpc = InstrumentServer(rsd_1).init()
-            result_queue = queue.Queue()
-            data = cmd_graphics(rpc, result_queue)
-            rsd_1.close()
-            rpc.stop()
+        data = get_fps_gpu_data()
+
         fps = data['CoreAnimationFramesPerSecond']  # fps from GPU
         yield DataType.FPS, {"fps": fps, "time": time.time(), "value": fps}
     else:
@@ -172,13 +175,12 @@ def iter_gpu(d: BaseDevice, rp: RunningProcess, address=None, rsdPort=None, lock
         host = address
         port = rsdPort
         with lock:
-            rsd_1 = RemoteLockdownClient((host, port), userspace_port=60106)
-            rsd_1.connect()
-            rpc = InstrumentServer(rsd_1).init()
-            result_queue = queue.Queue()
-            data = cmd_graphics(rpc, result_queue)
-            rsd_1.close()
-            rpc.stop()
+            if result_fps_gpu_queue is None:
+                monitor_thread = threading.Thread(target=cmd_graphics_thread, args=(address, rsdPort,), daemon=True)
+                monitor_thread.start()
+                time.sleep(1)
+
+        data = get_fps_gpu_data()
         device_utilization = data['Device Utilization %']  # Device Utilization
         tiler_utilization = data['Tiler Utilization %']  # Tiler Utilization
         renderer_utilization = data['Renderer Utilization %']  # Renderer Utilization
@@ -340,6 +342,86 @@ def worker(queue):
     with RemoteLockdownClient((host, port), userspace_port=60106) as rsd:
         print(rsd.product_version)
 
+
+
+def get_data():
+    """
+    从队列中获取数据。
+    """
+    global result_queue
+    try:
+        return result_queue.get(timeout=5)  # 设置超时时间，避免阻塞
+    except queue.Empty:
+        return None
+
+
+def get_fps_gpu_data():
+    """
+    从队列中获取数据。
+    """
+    global result_fps_gpu_queue
+    try:
+        return result_fps_gpu_queue.get(timeout=5)  # 设置超时时间，避免阻塞
+    except queue.Empty:
+        return None
+
+def get_network_data():
+    """
+       从队列中获取数据。
+       """
+    global result_network_queue
+    try:
+        return result_network_queue.get(timeout=5)  # 设置超时时间，避免阻塞
+    except queue.Empty:
+        return None
+
+def sysmontap_thread(address=None, rsdPort=None):
+    """
+    在后台线程中运行 sysmontap，持续向队列中推送数据。
+    """
+    global result_queue
+    global rsd_1
+    host = address
+    port = rsdPort
+    if rsd_1 is None:
+        rsd_1 = RemoteLockdownClient((host, port), userspace_port=60106)
+        rsd_1.connect()
+        rpc = InstrumentServer(rsd_1).init()
+    result_queue = queue.Queue()
+    sysmontap(rpc, result_queue)
+    rsd_1.close()
+    rpc.stop()
+
+def cmd_graphics_thread(address=None, rsdPort=None):
+    global result_fps_gpu_queue
+    global rsd_1
+    host = address
+    port = rsdPort
+    if rsd_1 is None:
+        rsd_1 = RemoteLockdownClient((host, port), userspace_port=60106)
+
+        rsd_1.connect()
+        rpc = InstrumentServer(rsd_1).init()
+    result_fps_gpu_queue = queue.Queue()
+    cmd_graphics(rpc, result_fps_gpu_queue)
+    rsd_1.close()
+    rpc.stop()
+
+
+def networking_thread(address=None, rsdPort=None):
+    global result_network_queue
+    global rsd_1
+    host = address
+    port = rsdPort
+    if rsd_1 is None:
+        rsd_1 = RemoteLockdownClient((host, port), userspace_port=60106)
+        rsd_1.connect()
+        rpc = InstrumentServer(rsd_1).init()
+    result_network_queue = queue.Queue()
+    networking(rpc, result_network_queue)
+    rsd_1.close()
+    rpc.stop()
+
 def _iter_complex_cpu_memory(d: BaseDevice,
                              rp: RunningProcess, address=None, rsdPort=None, lock=None, pid=None) -> Iterator[dict]:
     """
@@ -355,20 +437,19 @@ def _iter_complex_cpu_memory(d: BaseDevice,
         'mem_rss': 130760704,
         'pid': 1344}
     """
+    global result_queue
     if rp.get_version_lists() == 1:
         host = address
         port = rsdPort
         with lock:
-            rsd_1 = RemoteLockdownClient((host, port), userspace_port=60106)
-            rsd_1.connect()
-            rpc = InstrumentServer(rsd_1).init()
-            result_queue = queue.Queue()
-            result = sysmontap(rpc, result_queue)
-            rsd_1.close()
-            rpc.stop()
-        pid = pid
+            if result_queue is None:
+                monitor_thread = threading.Thread(target=sysmontap_thread, args=(address, rsdPort,), daemon=True)
+                monitor_thread.start()
+                time.sleep(1)
+
+        result = get_data()
         info = result
-        # print(info)
+
         # if info is None or len(info) != 2:
         #         continue
         sinfo, pinfolist = info
@@ -529,19 +610,22 @@ def set_interval(it: Iterator[Any], interval: float):
         time.sleep(wait)
 
 
-def iter_network_flow(d: BaseDevice, rp: RunningProcess, address=None, rsdPort=None) -> Iterator[Any]:
-    n = 0
+def iter_network_flow(d: BaseDevice, rp: RunningProcess, address=None, rsdPort=None, lock=None) -> Iterator[Any]:
+    global result_network_queue
     if rp.get_version_lists() == 1:
-        host = address
-        port = rsdPort
-        # with lock:
-        rsd_1 = RemoteLockdownClient((host, port), userspace_port=60106)
-        rsd_1.connect()
-        rpc = InstrumentServer(rsd_1).init()
-        result_queue = queue.Queue()
-        data = networking(rpc, result_queue)
-        rsd_1.close()
-        rpc.stop()
+        with lock:
+            if result_network_queue is None:
+                monitor_thread = threading.Thread(target=networking_thread, args=(address, rsdPort,), daemon=True)
+                monitor_thread.start()
+                time.sleep(1)
+
+        nstat = get_network_data()
+        yield DataType.NETWORK, {
+            "timestamp": gen_stimestamp(),
+            "downFlow": (nstat['RxBytes'] or 0) / 1024,
+            "upFlow": (nstat['TxBytes'] or 0) / 1024
+        }
+
     else:
         with d.connect_instruments() as ts:
             for nstat in ts.iter_network():
@@ -637,13 +721,12 @@ class Performance():
         if DataType.SCREENSHOT in self._perfs:
             iters.append(set_interval(iter_screenshot(self._d), 1.0))
         if DataType.NETWORK in self._perfs:
-            iters.append(iter_network_flow(self._d, self._rp, self._address, self._rsdPort))
+            iters.append(iter_network_flow(self._d, self._rp, self._address, self._rsdPort, lock))
         for it in (iters):  # yapf: disable
             self._wg.add(1)
             _perfValue = append_data(self._wg, self._stop_event, it, callback, self._perfs)
             break
 
-        print(_perfValue)
         return _perfValue
 
     def stop(self):  # -> PerfReport:

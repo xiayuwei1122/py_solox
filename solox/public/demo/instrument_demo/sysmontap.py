@@ -1,6 +1,7 @@
 """
 获取系统相关信息，类似 Android TOP，包含进程信息，需要 iOS > 11
 """
+import json
 import os
 import sys
 import time
@@ -11,13 +12,16 @@ sys.path.append(os.getcwd())
 import threading
 import queue
 
-def sysmontap(rpc, result_queue):
+stop_flag = False
+
+def sysmontap(rpc, result_queue, cpu_flag=True):
     def dropped_message(res):
         print("[DROP]", res.selector, res.raw.channel_code)
 
     def on_sysmontap_message(res):
         if isinstance(res.selector, list):
             result_queue.put(res.selector)
+            # print(res.selector)
 
     rpc.register_undefined_callback(dropped_message)
     config = {
@@ -38,18 +42,24 @@ def sysmontap(rpc, result_queue):
     rpc.register_channel_callback("com.apple.instruments.server.services.sysmontap", on_sysmontap_message)
     var = rpc.call("com.apple.instruments.server.services.sysmontap", "start").selector
     # print(f"start {var}")
-    time.sleep(0.5)
+    # time.sleep(15)
+    while True:
+        if not stop_flag:
+            time.sleep(1)  # 每隔 1 秒执行一次
+        else:
+            break
     # 等待回调触发并获取结果
-    try:
-        result = result_queue.get(timeout=5)  # 等待 5 秒
-    except queue.Empty:
-        print("Timeout: No message received from on_sysmontap_message.")
-        result = None
-
+    # try:
+    #     result = result_queue.get(timeout=5)  # 等待 5 秒
+    # except queue.Empty:
+    #     print("Timeout: No message received from on_sysmontap_message.")
+    #     result = None
+    #
     var = rpc.call("com.apple.instruments.server.services.sysmontap", "stop").selector
-    # print(f"stop {var}")
+    print(f"stop {var}")
     rpc.stop()
-    return result
+    # print("----", result)
+    # return result
 
 
 #

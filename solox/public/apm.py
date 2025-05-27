@@ -1,4 +1,5 @@
 import datetime
+import importlib
 import queue
 import re
 import time
@@ -17,12 +18,13 @@ from solox.public.iosperf._perf import DataType, Performance
 from solox.public.adb import adb
 from solox.public.common import Devices, File, Method, Platform, Scrcpy
 from solox.public.android_fps import FPSMonitor, TimeUtils
-from solox.public.demo.instrument_demo.sysmontap import sysmontap
+from solox.public.demo.instrument_demo import sysmontap
+from solox.public.demo.instrument_demo import graphics
+from solox.public.demo.instrument_demo import networking
 from solox.public.iosperf._device import BaseDevice
 from solox.public.iosperf._proto import *
 from ios_device.remote.remote_lockdown import RemoteLockdownClient
 from ios_device.servers.Instrument import InstrumentServer
-from solox.public.demo.instrument_demo.sysmontap import sysmontap
 from multiprocessing import Pool, Manager
 
 d = Devices()
@@ -185,6 +187,7 @@ class CPU(object):
             apm_time = datetime.datetime.now().strftime('%H:%M:%S.%f')
             f.add_log(os.path.join(f.report_dir, 'cpu_app.log'), apm_time, appCpuRate)
             f.add_log(os.path.join(f.report_dir, 'cpu_sys.log'), apm_time, sysCpuRate)
+        print("cpu", appCpuRate, sysCpuRate)
         return appCpuRate, sysCpuRate
 
     def getCpuRate(self, noLog=False, lock=None, pid=None):
@@ -418,7 +421,7 @@ class Network(object):
     def getiOSNet(self, lock=None):
         """Get iOS upflow and downflow data"""
         apm = iosPerformance(self.pkgName, self.deviceId, address=self._address, rsdPort=self._rsdPort)
-        apm_data = apm.getPerformance(apm.network, lock=lock)
+        apm_data = apm.getPerformance(apm.network, lock=lock, pid=self.pid)
         sendNum = round(float(apm_data[1]), 2)
         recNum = round(float(apm_data[0]), 2)
         return sendNum, recNum
@@ -698,7 +701,7 @@ class iosPerformance(object):
             self.perfs = value['value']
 
     def getPerformance(self, perfType: DataType, lock=None, pid=None):
-        if perfType == DataType.NETWORK:
+        if perfType == DataType.NETWORK and lock is None:
             perf = Performance(tidevice.Device(udid=self.deviceId), [perfType], self._address, self._rsdPort)
             perf.start(self.pkgName, callback=self.callback, lock=lock)
             time.sleep(3)
@@ -758,18 +761,12 @@ class AppPerformanceMonitor(initPerformanceService):
         d.devicesCheck(platform=self.platform, deviceid=self.deviceId, pkgname=self.pkgName)
         self.start()
 
-    def collectCpu(self, lock=None, condition=None, turn=None):
+    def collectCpu(self, lock=None):
         _cpu = CPU(self.pkgName, self.deviceId, self.platform, pid=self.pid, address=self.address, rsdPort=self.rsdPort)
         result = {}
         while self.get_status() == 'on':
             if self.platform == "iOS" and self.address is not None:
-                with condition:  # 使用条件变量
-                    while turn.value != "CPU":  # 如果不是 CPU 的轮次，则等待
-                        condition.wait()
-                    # with lock:  # 获取锁
                     appCpuRate, systemCpuRate = _cpu.getCpuRate(noLog=self.noLog, lock=lock, pid=self.pid)
-                    turn.value = "Memory"  # 轮到 Memory 执行
-                    condition.notify_all()  # 通知其他任务
             else:
                 appCpuRate, systemCpuRate = _cpu.getCpuRate(noLog=self.noLog)
             result = {'appCpuRate': appCpuRate, 'systemCpuRate': systemCpuRate}
@@ -777,6 +774,8 @@ class AppPerformanceMonitor(initPerformanceService):
             if self.collect_all is False:
                 break
             if self.duration > 0 and time.time() > self.end_time:
+                sysmontap.stop_flag = True
+                importlib.reload(sysmontap)
                 break
         return result
 
@@ -789,18 +788,13 @@ class AppPerformanceMonitor(initPerformanceService):
         logger.info(f'cpu core: {result}')
         return result
 
-    def collectMemory(self, lock=None, condition=None, turn=None):
+    def collectMemory(self, lock=None):
         _memory = Memory(self.pkgName, self.deviceId, self.platform, pid=self.pid, address=self.address,
                          rsdPort=self.rsdPort)
         result = {}
         while self.get_status() == 'on':
             if self.platform == "iOS" and self.address is not None:
-                with condition:  # 使用条件变量
-                    while turn.value != "Memory":  # 如果不是 Memory 的轮次，则等待
-                        condition.wait()
-                    total, swap = _memory.getProcessMemory(noLog=self.noLog, lock=lock, pid=self.pid)
-                    turn.value = "FPS"  # 轮到 FPS 执行
-                    condition.notify_all()  # 通知其他任务
+                total, swap = _memory.getProcessMemory(noLog=self.noLog, lock=lock, pid=self.pid)
             else:
                 total, swap = _memory.getProcessMemory(noLog=self.noLog)
             result = {'total': total, 'swap': swap}
@@ -808,6 +802,8 @@ class AppPerformanceMonitor(initPerformanceService):
             if self.collect_all is False:
                 break
             if self.duration > 0 and time.time() > self.end_time:
+                sysmontap.stop_flag = True
+                importlib.reload(sysmontap)
                 break
         return result
 
@@ -844,7 +840,7 @@ class AppPerformanceMonitor(initPerformanceService):
                 break
         return result
 
-    def collectNetwork(self, wifi=True, lock=None, condition=None, turn=None):
+    def collectNetwork(self, wifi=True, lock=None):
         _network = Network(self.pkgName, self.deviceId, self.platform, pid=self.pid, address=self.address,
                            rsdPort=self.rsdPort)
         if self.noLog is False and self.platform == Platform.Android:
@@ -853,12 +849,7 @@ class AppPerformanceMonitor(initPerformanceService):
         result = {}
         while self.get_status() == 'on':
             if self.platform == "iOS" and self.address is not None:
-                with condition:  # 使用条件变量
-                    while turn.value != "Network":  # 如果不是 Network 的轮次，则等待
-                        condition.wait()
-                    upFlow, downFlow = _network.getNetWorkData(wifi=wifi, noLog=self.noLog, lock=lock)
-                    turn.value = "Gpu"  # 轮到 CPU 执行
-                    condition.notify_all()  # 通知其他任务
+                upFlow, downFlow = _network.getNetWorkData(wifi=wifi, noLog=self.noLog, lock=lock)
             else:
                 upFlow, downFlow = _network.getNetWorkData(wifi=wifi, noLog=self.noLog)
             result = {'send': upFlow, 'recv': downFlow}
@@ -866,21 +857,18 @@ class AppPerformanceMonitor(initPerformanceService):
             if self.collect_all is False:
                 break
             if self.duration > 0 and time.time() > self.end_time:
+                networking.stop_flag = True
+                importlib.reload(networking)
                 break
         return result
 
-    def collectFps(self, lock=None, condition=None, turn=None):
+    def collectFps(self, lock=None):
         _fps = FPS(self.pkgName, self.deviceId, self.platform, self.surfaceview, address=self.address,
                    rsdPort=self.rsdPort)
         result = {}
         while self.get_status() == 'on':
             if self.platform == "iOS" and self.address is not None:
-                with condition:  # 使用条件变量
-                    while turn.value != "FPS":  # 如果不是 Memory 的轮次，则等待
-                        condition.wait()
-                    fps, jank = _fps.getFPS(noLog=self.noLog, lock=lock)
-                    turn.value = "Network"  # 轮到 NETWORK 执行
-                    condition.notify_all()  # 通知其他任务
+                fps, jank = _fps.getFPS(noLog=self.noLog, lock=lock)
             else:
                 fps, jank = _fps.getFPS(noLog=self.noLog)
             result = {'fps': fps, 'jank': jank}
@@ -888,21 +876,18 @@ class AppPerformanceMonitor(initPerformanceService):
             if self.collect_all is False:
                 break
             if self.duration > 0 and time.time() > self.end_time:
+                graphics.stop_flag = True
+                importlib.reload(graphics)
                 break
         return result
 
-    def collectGpu(self, lock=None, condition=None, turn=None):
+    def collectGpu(self, lock=None):
         _gpu = GPU(self.pkgName, self.deviceId, self.platform, address=self.address,
                    rsdPort=self.rsdPort)
         result = {}
         while self.get_status() == 'on':
             if self.platform == "iOS" and self.address is not None:
-                with condition:  # 使用条件变量
-                    while turn.value != "Gpu":  # 如果不是 Memory 的轮次，则等待
-                        condition.wait()
-                    gpu = _gpu.getGPU(noLog=self.noLog, lock=lock)
-                    turn.value = "CPU"  # 轮到 NETWORK 执行
-                    condition.notify_all()  # 通知其他任务
+                gpu = _gpu.getGPU(noLog=self.noLog, lock=lock)
             else:
                 gpu = _gpu.getGPU(noLog=self.noLog)
             result = {'gpu': gpu}
@@ -910,6 +895,8 @@ class AppPerformanceMonitor(initPerformanceService):
             if self.collect_all is False:
                 break
             if self.duration > 0 and time.time() > self.end_time:
+                graphics.stop_flag = True
+                importlib.reload(graphics)
                 break
         return result
 
@@ -997,16 +984,13 @@ class AppPerformanceMonitor(initPerformanceService):
             pool = multiprocessing.Pool(processes=process_num)
             manager = Manager()  # 创建 Manager
             lock = manager.Lock()
-            condition = manager.Condition()  # 创建条件变量
-            turn = manager.Value("string", "CPU")  # 记录当前轮次，初始为 CPU
-            pool.apply_async(self.collectCpu, args=(lock, condition, turn))
-
-            pool.apply_async(self.collectMemory, args=(lock, condition, turn))
+            pool.apply_async(self.collectCpu, args=(lock,))
+            pool.apply_async(self.collectMemory, args=(lock,))
             pool.apply_async(self.collectMemoryDetail)
             pool.apply_async(self.collectBattery)
-            pool.apply_async(self.collectFps, args=(lock, condition, turn))
-            pool.apply_async(self.collectNetwork, args=(True, lock, condition, turn))
-            pool.apply_async(self.collectGpu, args=(lock, condition, turn))
+            pool.apply_async(self.collectFps, args=(lock,))
+            pool.apply_async(self.collectNetwork, args=(True, lock, ))
+            pool.apply_async(self.collectGpu, args=(lock,))
             if self.record:
                 pool.apply_async(Scrcpy.start_record, (self.deviceId))
             pool.close()
