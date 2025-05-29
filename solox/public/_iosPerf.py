@@ -32,7 +32,10 @@ from ios_device.util.utils import DumpDisk, DumpNetwork, DumpMemory, convertByte
 result_fps_gpu_queue = None
 result_network_queue = None
 result_queue = None
+result_cpu_queue = None
+result_memory_queue = None
 rsd_1 = None
+
 
 class DataType(str, enum.Enum):
     SCREENSHOT = "screenshot"
@@ -185,7 +188,7 @@ def iter_gpu(d: BaseDevice, rp: RunningProcess, address=None, rsdPort=None, lock
         tiler_utilization = data['Tiler Utilization %']  # Tiler Utilization
         renderer_utilization = data['Renderer Utilization %']  # Renderer Utilization
         yield DataType.GPU, {"device": device_utilization, "renderer": renderer_utilization,
-                         "tiler": tiler_utilization, "time": time.time(), "value": device_utilization}
+                             "tiler": tiler_utilization, "time": time.time(), "value": device_utilization}
     else:
         with d.instruments_context() as ts:
             for data in ts.iter_opengl_data():
@@ -343,7 +346,6 @@ def worker(queue):
         print(rsd.product_version)
 
 
-
 def get_data():
     """
     从队列中获取数据。
@@ -353,6 +355,46 @@ def get_data():
         return result_queue.get(timeout=5)  # 设置超时时间，避免阻塞
     except queue.Empty:
         return None
+
+
+def get_cpu_data(max_retries=3, retry_interval=2):
+    """
+    从队列中获取数据。
+    """
+    global result_cpu_queue
+    retries = 0  # 记录当前重试次数
+    while retries < max_retries:
+        try:
+            # 尝试从队列中获取数据
+            return result_cpu_queue.get(timeout=5)  # 设置超时时间，避免阻塞
+        except queue.Empty:
+            # 如果队列为空，打印日志并等待重试
+            print(f"Queue is empty, retrying... ({retries + 1}/{max_retries})")
+            retries += 1
+            time.sleep(retry_interval)  # 等待一段时间后重试
+    # 如果重试次数耗尽，返回 None 或采取其他措施
+    print("Max retries reached, no data available.")
+    return None
+
+
+def get_memory_data(max_retries=3, retry_interval=2):
+    """
+    从队列中获取数据。
+    """
+    global result_memory_queue
+    retries = 0  # 记录当前重试次数
+    while retries < max_retries:
+        try:
+            # 尝试从队列中获取数据
+            return result_memory_queue.get(timeout=5)  # 设置超时时间，避免阻塞
+        except queue.Empty:
+            # 如果队列为空，打印日志并等待重试
+            print(f"Queue is empty, retrying... ({retries + 1}/{max_retries})")
+            retries += 1
+            time.sleep(retry_interval)  # 等待一段时间后重试
+    # 如果重试次数耗尽，返回 None 或采取其他措施
+    print("Max retries reached, no data available.")
+    return None
 
 
 def get_fps_gpu_data():
@@ -365,6 +407,7 @@ def get_fps_gpu_data():
     except queue.Empty:
         return None
 
+
 def get_network_data():
     """
        从队列中获取数据。
@@ -375,11 +418,13 @@ def get_network_data():
     except queue.Empty:
         return None
 
+
 def sysmontap_thread(address=None, rsdPort=None):
     """
     在后台线程中运行 sysmontap，持续向队列中推送数据。
     """
-    global result_queue
+    global result_cpu_queue
+    global result_memory_queue
     global rsd_1
     host = address
     port = rsdPort
@@ -387,10 +432,12 @@ def sysmontap_thread(address=None, rsdPort=None):
         rsd_1 = RemoteLockdownClient((host, port), userspace_port=60106)
         rsd_1.connect()
         rpc = InstrumentServer(rsd_1).init()
-    result_queue = queue.Queue()
-    sysmontap(rpc, result_queue)
-    rsd_1.close()
-    rpc.stop()
+        result_cpu_queue = queue.Queue()
+        result_memory_queue = queue.Queue()
+        sysmontap(rpc, result_cpu_queue, result_memory_queue)
+        rsd_1.close()
+        rpc.stop()
+
 
 def cmd_graphics_thread(address=None, rsdPort=None):
     global result_fps_gpu_queue
@@ -423,7 +470,8 @@ def networking_thread(address=None, rsdPort=None):
     rpc.stop()
 
 def _iter_complex_cpu_memory(d: BaseDevice,
-                             rp: RunningProcess, address=None, rsdPort=None, lock=None, pid=None) -> Iterator[dict]:
+                             rp: RunningProcess, address=None, rsdPort=None, lock=None, pid=None, data_type=None) -> \
+        Iterator[dict]:
     """
     content in iterator
 
@@ -438,21 +486,31 @@ def _iter_complex_cpu_memory(d: BaseDevice,
         'pid': 1344}
     """
     global result_queue
+    global result_cpu_queue
+    global result_memory_queue
     if rp.get_version_lists() == 1:
-        host = address
-        port = rsdPort
-        with lock:
-            if result_queue is None:
-                monitor_thread = threading.Thread(target=sysmontap_thread, args=(address, rsdPort,), daemon=True)
-                monitor_thread.start()
-                time.sleep(1)
+        if data_type == DataType.MEMORY:
+            with lock:
+                if result_memory_queue is None:
+                    monitor_thread = threading.Thread(target=sysmontap_thread, args=(address, rsdPort,), daemon=True)
+                    monitor_thread.start()
+                    time.sleep(1)
 
-        result = get_data()
-        info = result
+            result = get_memory_data()
+            info = result
+        else:
+            with lock:
+                if result_cpu_queue is None:
+                    monitor_thread = threading.Thread(target=sysmontap_thread, args=(address, rsdPort,), daemon=True)
+                    monitor_thread.start()
+                    time.sleep(1)
+            result = get_cpu_data()
+            info = result
 
-        # if info is None or len(info) != 2:
-        #         continue
         sinfo, pinfolist = info
+        if 'CPUCount' not in sinfo:
+            sinfo, pinfolist = pinfolist, sinfo
+
         if 'CPUCount' not in sinfo:
             sinfo, pinfolist = pinfolist, sinfo
 
@@ -487,7 +545,6 @@ def _iter_complex_cpu_memory(d: BaseDevice,
             pinfo = ProcAttrs(*attrs)
             if pinfo.cpuUsage is not None:
                 cpu_usage = pinfo.cpuUsage
-
         yield dict(
             type="process",
             pid=pid,
@@ -579,26 +636,65 @@ def _iter_complex_cpu_memory(d: BaseDevice,
 
 
 def iter_memory(d: BaseDevice, rp: RunningProcess, address=None, rsdPort=None, lock=None, pid=None) -> Iterator[Any]:
-    for minfo in _iter_complex_cpu_memory(d, rp, address, rsdPort, lock, pid):  # d.iter_cpu_mem(bundle_id):
-        yield DataType.MEMORY, {
-            "pid": minfo['pid'],
-            "timestamp": gen_stimestamp(),
-            "value": minfo['phys_memory'] / 1024 / 1024,  # MB
-        }
+    retries = 0  # Initialize retry counter
+    max_retries = 3
+    retry_delay = 2
+    while retries <= max_retries:  # Retry loop
+        try:
+            print("Attempting to iterate MEMORY data...")
+            # Main logic to iterate CPU data
+            for minfo in _iter_complex_cpu_memory(d, rp, address, rsdPort, lock, pid,
+                                                  data_type=DataType.MEMORY):
+                print("DataType.MEMORY")
+                yield DataType.MEMORY, {
+                    "pid": minfo['pid'],
+                    "timestamp": gen_stimestamp(),
+                    "value": minfo['phys_memory'] / 1024 / 1024,  # MB
+                }
+
+            # If the loop completes successfully, break out of the retry loop
+            break
+        except Exception as e:
+            # Handle exceptions and retry
+            retries += 1
+            print(f"Error occurred: {e}")
+            if retries > max_retries:
+                print(f"Max retries reached ({max_retries}). Raising exception.")
+                raise  # Re-raise the exception after exceeding max retries
+            else:
+                print(f"Retrying in {retry_delay} seconds... (Attempt {retries}/{max_retries})")
+                time.sleep(retry_delay)  # Wait before retrying
 
 
 def iter_cpu(d: BaseDevice, rp: RunningProcess, address=None, rsdPort=None, lock=None, pid=None) -> Iterator[Any]:
-    try:
-        for minfo in _iter_complex_cpu_memory(d, rp, address, rsdPort, lock, pid):  # d.iter_cpu_mem(bundle_id):
-            yield DataType.CPU, {
-                "timestamp": gen_stimestamp(),
-                "pid": minfo['pid'],
-                "value": minfo['cpu_usage'],  # max 100.0?, maybe not
-                "sys_value": minfo['sys_cpu_usage'],
-                "count": minfo['cpu_count']
-            }
-    except Exception as e:
-        print(e)
+    retries = 0  # Initialize retry counter
+    max_retries = 3
+    retry_delay = 2
+    while retries <= max_retries:  # Retry loop
+        try:
+            print("Attempting to iterate CPU data...")
+            # Main logic to iterate CPU data
+            for minfo in _iter_complex_cpu_memory(d, rp, address, rsdPort, lock, pid,
+                                                  data_type=DataType.CPU):
+                yield DataType.CPU, {
+                    "timestamp": gen_stimestamp(),
+                    "pid": minfo['pid'],
+                    "value": minfo['cpu_usage'],  # max 100.0?, maybe not
+                    "sys_value": minfo['sys_cpu_usage'],
+                    "count": minfo['cpu_count']
+                }
+            # If the loop completes successfully, break out of the retry loop
+            break
+        except Exception as e:
+            # Handle exceptions and retry
+            retries += 1
+            print(f"Error occurred: {e}")
+            if retries > max_retries:
+                print(f"Max retries reached ({max_retries}). Raising exception.")
+                raise  # Re-raise the exception after exceeding max retries
+            else:
+                print(f"Retrying in {retry_delay} seconds... (Attempt {retries}/{max_retries})")
+                time.sleep(retry_delay)  # Wait before retrying
 
 
 def set_interval(it: Iterator[Any], interval: float):
@@ -641,7 +737,6 @@ def iter_network_flow(d: BaseDevice, rp: RunningProcess, address=None, rsdPort=N
 
 def append_data(wg: WaitGroup, stop_event: threading.Event,
                 idata: Iterator[Any], callback: CallbackType, filters: list):
-
     for _type, data in idata:
         assert isinstance(data, dict)
         assert isinstance(_type, DataType)
@@ -666,7 +761,6 @@ def append_data(wg: WaitGroup, stop_event: threading.Event,
                 if data['count'] > 0:
                     app_cpu /= data['count']
                     sys_cpu /= data['count']
-                print(app_cpu, " 00000", sys_cpu)
                 return app_cpu, sys_cpu
             else:
                 return data['value']
@@ -709,7 +803,6 @@ class Performance():
         iters = []
         _perfValue = 0
 
-        print(self._perfs)
         if DataType.CPU in self._perfs:
             iters.append(iter_cpu(self._d, self._rp, self._address, self._rsdPort, lock, pid))
         if DataType.MEMORY in self._perfs:

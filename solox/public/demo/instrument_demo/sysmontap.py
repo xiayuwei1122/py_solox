@@ -14,13 +14,14 @@ import queue
 
 stop_flag = False
 
-def sysmontap(rpc, result_queue, cpu_flag=True):
+def sysmontap(rpc, result_cpu_queue, result_memory_queue):
     def dropped_message(res):
         print("[DROP]", res.selector, res.raw.channel_code)
 
     def on_sysmontap_message(res):
         if isinstance(res.selector, list):
-            result_queue.put(res.selector)
+            result_cpu_queue.put(res.selector)
+            result_memory_queue.put(res.selector)
             # print(res.selector)
 
     rpc.register_undefined_callback(dropped_message)

@@ -187,7 +187,6 @@ class CPU(object):
             apm_time = datetime.datetime.now().strftime('%H:%M:%S.%f')
             f.add_log(os.path.join(f.report_dir, 'cpu_app.log'), apm_time, appCpuRate)
             f.add_log(os.path.join(f.report_dir, 'cpu_sys.log'), apm_time, sysCpuRate)
-        print("cpu", appCpuRate, sysCpuRate)
         return appCpuRate, sysCpuRate
 
     def getCpuRate(self, noLog=False, lock=None, pid=None):
@@ -284,7 +283,6 @@ class Memory(object):
 
     def getiOSMemory(self, lock=None, pid=None):
         """Get the iOS memory"""
-        print("getiOSMemory")
         apm = iosPerformance(self.pkgName, self.deviceId, self._address, self._rsdPort)
         totalPass = round(float(apm.getPerformance(apm.memory, lock=lock, pid=pid)), 2)
         swapPass = 0
@@ -766,7 +764,7 @@ class AppPerformanceMonitor(initPerformanceService):
         result = {}
         while self.get_status() == 'on':
             if self.platform == "iOS" and self.address is not None:
-                    appCpuRate, systemCpuRate = _cpu.getCpuRate(noLog=self.noLog, lock=lock, pid=self.pid)
+                appCpuRate, systemCpuRate = _cpu.getCpuRate(noLog=self.noLog, lock=lock, pid=self.pid)
             else:
                 appCpuRate, systemCpuRate = _cpu.getCpuRate(noLog=self.noLog)
             result = {'appCpuRate': appCpuRate, 'systemCpuRate': systemCpuRate}
